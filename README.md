@@ -294,3 +294,155 @@ git push -u origin main
 1. **Ментальная карта** — по описанию в разделе «Ментальная карта» (draw.io / XMind / от руки + фото).
 2. **Схема процесса** — по разделу 6 (draw.io / от руки + фото).
 3. **Рецензия** — сохранить как `review/review-student-X.md`, заменив `[ФИО]` и `[дата]` на реальные.
+
+4. import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+from pathlib import Path
+from IPython.display import Markdown, display, Image
+
+# ==========================================
+# 1. PRÉPARATION DES DOSSIERS ET GÉNÉRATION DES DONNÉES
+# ==========================================
+Path("data").mkdir(exist_ok=True)
+Path("output").mkdir(exist_ok=True)
+
+RNG = np.random.default_rng(42)
+CATEGORIES = ["auth", "network", "lms", "email", "other"]
+CATEGORY_WEIGHTS = [0.30, 0.20, 0.25, 0.15, 0.10]
+CATEGORY_SERVICE_MEAN = {"auth": 8, "network": 15, "lms": 20, "email": 6, "other": 25}
+
+def simulate_one_day(n_specialists: int, n_requests: int, day: int) -> list[dict]:
+    inter_arrivals = RNG.exponential(scale=480 / n_requests, size=n_requests)
+    arrivals = np.cumsum(inter_arrivals)
+    free_at = np.zeros(n_specialists)
+    records = []
+    for i, t_arr in enumerate(arrivals):
+        idx = int(np.argmin(free_at))
+        t_start = max(t_arr, free_at[idx])
+        cat = RNG.choice(CATEGORIES, p=CATEGORY_WEIGHTS)
+        service = max(1.0, RNG.normal(CATEGORY_SERVICE_MEAN[cat], CATEGORY_SERVICE_MEAN[cat] * 0.4))
+        t_end = t_start + service
+        free_at[idx] = t_end
+        records.append({
+            "request_id": f"R{day:02d}-{i:04d}",
+            "created_at_min": round(float(t_arr), 2),
+            "assigned_at_min": round(float(t_start), 2),
+            "resolved_at_min": round(float(t_end), 2),
+            "Category": cat,
+            "specialist_id": f"S{idx + 1}",
+            "Status": "resolved",
+            "day": day,
+            "n_specialists": n_specialists,
+        })
+    return records
+
+print(" 1. Génération des données synthétiques...")
+rows = []
+for day in range(1, 11):
+    for c in (3, 4, 5):
+        rows.extend(simulate_one_day(n_specialists=c, n_requests=120, day=day))
+
+df = pd.DataFrame(rows)
+df["W_min"] = df["assigned_at_min"] - df["created_at_min"]
+df["D_min"] = df["resolved_at_min"] - df["created_at_min"]
+df.to_csv("data/synthetic_requests.csv", index=False)
+print(f"1 Données sauvegardées : {len(df)} lignes dans data/synthetic_requests.csv\n")
+
+# ==========================================
+# 2. CALCUL DES KPI
+# ==========================================
+print(" 2. Calcul des KPI...")
+kpi_rows = []
+for c, g in df.groupby("n_specialists"):
+    kpi_rows.append({
+        "n_specialists": c,
+        "n_requests": len(g),
+        "share_W_le_10min": (g["W_min"] <= 10).mean(),
+        "p90_D_min": g["D_min"].quantile(0.90),
+        "mean_D_min": g["D_min"].mean(),
+        "share_D_le_60min": (g["D_min"] <= 60).mean(),
+    })
+kpi_df = pd.DataFrame(kpi_rows).sort_values("n_specialists")
+
+md_lines = ["### Indicateurs de résultat (KPI)\n"]
+md_lines.append("| Spécialistes | Appels | Part W ≤ 10 min | 90e centile D, min | Moyenne D, min | Part D ≤ 60 min |")
+md_lines.append("|---|---|---|---|---|---|")
+for _, r in kpi_df.iterrows():
+    md_lines.append(
+        f"| {int(r['n_specialists'])} | {int(r['n_requests'])} | "
+        f"{r['share_W_le_10min']:.1%} | {r['p90_D_min']:.1f} | "
+        f"{r['mean_D_min']:.1f} | {r['share_D_le_60min']:.1%} |"
+    )
+kpi_md = "\n".join(md_lines)
+with open("output/kpi_report.md", "w", encoding="utf-8") as f:
+    f.write(kpi_md)
+display(Markdown(kpi_md))
+
+# ==========================================
+# 3. SCHÉMA DU PROCESSUS (MATPLOTLIB)
+# ==========================================
+print(" 3. Dessin du schéma de processus...")
+STEPS = [
+    ("Entrée :\nAppel", 0.5, "#d9edf7"), ("(1) Enregistrement\ncreated_at", 2.5, "#c8e6c9"),
+    ("(2) File d'attente", 4.5, "#c8e6c9"), ("(3) Affectation\nassigned_at", 6.5, "#c8e6c9"),
+    ("(4) Traitement", 8.5, "#c8e6c9"), ("(5) Clôture\nresolved_at", 10.5, "#c8e6c9"),
+    ("Sortie :\nRésolu", 12.5, "#d9edf7"),
+]
+KPI_LABELS = {2.5: "KPI : created_at", 6.5: "KPI : W = assigned − created", 10.5: "KPI : D = resolved − created"}
+
+fig, ax = plt.subplots(figsize=(16, 4.5))
+ax.set_xlim(0, 13); ax.set_ylim(0, 3); ax.axis("off")
+ax.add_patch(FancyBboxPatch((1.4, 0.3), 10.2, 2.4, boxstyle="round,pad=0.05", linewidth=2, edgecolor="red", facecolor="none", linestyle="--"))
+ax.text(1.5, 2.6, "Frontière du système", color="red", fontsize=11, fontweight="bold")
+for label, x, color in STEPS:
+    ax.add_patch(FancyBboxPatch((x - 0.85, 1.0), 1.7, 0.9, boxstyle="round,pad=0.05", linewidth=1.5, edgecolor="black", facecolor=color))
+    ax.text(x, 1.45, label, ha="center", va="center", fontsize=9)
+for i in range(len(STEPS) - 1):
+    ax.add_patch(FancyArrowPatch((STEPS[i][1] + 0.85, 1.45), (STEPS[i + 1][1] - 0.85, 1.45), arrowstyle="->", mutation_scale=18, linewidth=1.5, color="black"))
+for x, label in KPI_LABELS.items():
+    ax.annotate(label, xy=(x, 0.9), xytext=(x, 0.55), ha="center", fontsize=8, color="darkgreen", arrowprops=dict(arrowstyle="->", color="darkgreen", lw=1))
+ax.set_title("Schéma du processus d'information : appels au support de l'IS", fontsize=12, fontweight="bold")
+plt.tight_layout()
+plt.savefig("output/scheme_process.png", dpi=150, bbox_inches="tight")
+plt.close()
+display(Image(filename="output/scheme_process.png"))
+
+# ==========================================
+# 4. CARTE MENTALE (MATPLOTLIB - SANS ERREUR DE BIBLIOTHÈQUE)
+# ==========================================
+print(" 4. Dessin de la carte mentale...")
+fig, ax = plt.subplots(figsize=(12, 8))
+ax.set_xlim(0, 10); ax.set_ylim(0, 10); ax.axis("off")
+
+# Nœud central
+ax.add_patch(plt.Circle((5, 5), 1.3, color="#ffe082", ec="black", lw=2, zorder=3))
+ax.text(5, 5, "Appels au\nsupport\nde l'IS", ha="center", va="center", fontsize=11, fontweight="bold", zorder=4)
+
+# Branches
+branches = {
+    "Entrée\nAₜ, kᵢ": (2, 8, "#d9edf7"),
+    "Ressources\ncₜ, μ, planning": (8, 8, "#d9edf7"),
+    "Processus\nenregistrement → ...": (8, 2, "#c8e6c9"),
+    "Sortie\nWᵢ, Dᵢ, Sᵢ": (2, 2, "#d9edf7"),
+    "KPI\npart ≤ 10 min\n90e centile": (5, 8.5, "#f8bbd0"),
+    "Décision\nA / B / C": (5, 1.5, "#ffe082"),
+    "Limites\nqualité, charge": (0.8, 5, "#e0e0e0")
+}
+
+for label, (x, y, color) in branches.items():
+    # Flèche du centre vers la branche
+    ax.annotate("", xy=(x, y), xytext=(5, 5), arrowprops=dict(arrowstyle="->", lw=1.5, color="gray"), zorder=1)
+    # Bloc de la branche
+    ax.add_patch(FancyBboxPatch((x - 1.3, y - 0.5), 2.6, 1.0, boxstyle="round,pad=0.1", facecolor=color, edgecolor="black", lw=1.5, zorder=2))
+    ax.text(x, y, label, ha="center", va="center", fontsize=9, zorder=3)
+
+plt.title("Carte mentale du système étudié", fontsize=14, fontweight="bold")
+plt.tight_layout()
+plt.savefig("output/mental_map.png", dpi=150, bbox_inches="tight")
+plt.close()
+display(Image(filename="output/mental_map.png"))
+
+print("\n TOUT EST PRÊT ! Vérifiez le dossier 'output' — il contient 3 fichiers (2 images et 1 rapport).")
